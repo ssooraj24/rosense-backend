@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: rosense-backend-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: SUPABASE_ENV
+        value: cloud
+      - key: SUPABASE_URL
+        value: https://bbpwaxgwxrvesxmouocv.supabase.co
+      - key: SUPABASE_JWKS_URL
+        value: https://bbpwaxgwxrvesxmouocv.supabase.co/auth/v1/.well-known/jwks.json
