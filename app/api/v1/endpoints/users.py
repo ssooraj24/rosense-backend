@@ -71,10 +71,10 @@ async def invite_tenant_user(
         if not caller.user:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        # Prioritize explicitly provided target org_id in payload, fallback to caller's org_id
-        org_id = payload.org_id or get_caller_org_id(caller.user, admin_supabase)
-        if not org_id:
-            raise HTTPException(status_code=400, detail="Organization ID is required to invite user")
+        # Prioritize explicitly provided target org_id in payload. Allow org_id to be None for system/internal roles (superadmin, admin)
+        org_id = payload.org_id
+        if not org_id and payload.role not in ["superadmin", "admin"]:
+            org_id = get_caller_org_id(caller.user, admin_supabase)
 
         user_id = None
 
