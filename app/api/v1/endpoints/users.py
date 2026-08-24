@@ -270,7 +270,8 @@ async def update_user_full_record(
 
         # Update Profile
         update_data = {
-            "org_id": target_org_id
+            "org_id": target_org_id,
+            "department": target_dept
         }
         if payload.full_name is not None:
             update_data["full_name"] = payload.full_name
