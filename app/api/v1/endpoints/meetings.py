@@ -4,12 +4,18 @@ from typing import Optional, List
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, Header, status, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, Header, status, UploadFile, File, Form, BackgroundTasks, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.core.supabase_client import get_supabase_client, get_supabase_admin_client
-from app.services.audio_storage import save_uploaded_audio, get_audio_file_path, delete_stored_audio
+from app.services.audio_storage import (
+    save_and_encrypt_uploaded_audio,
+    get_audio_file_path,
+    delete_stored_audio,
+    read_decrypted_audio_stream
+)
+from app.core.crypto_vault import decrypt_audio_bytes
 from app.services.whisper_pipeline import whisper_pipeline
 
 router = APIRouter()
@@ -85,23 +91,24 @@ async def upload_meeting_audio(
     authorization: Optional[str] = Header(None)
 ):
     """
-    Ingests audio file or in-browser live recording blob, saves to tenant-scoped storage,
-    creates meeting database record, and queues Stage 1 WhisperX STT pipeline.
+    Ingests audio file or in-browser live recording blob, performs AES-256-GCM Envelope
+    Encryption, saves .enc ciphertext to tenant-scoped storage, creates database record,
+    and queues Stage 1 WhisperX STT pipeline.
     """
     caller_user, org_id, token = get_current_user_and_org(authorization)
     admin_supabase = get_supabase_admin_client()
 
     meeting_id = str(uuid.uuid4())
 
-    # 1. Save audio to tenant-isolated disk storage
+    # 1. Encrypt and save audio to tenant-isolated disk storage (.enc)
     try:
-        stored_path, orig_filename, file_size, mime_type = await save_uploaded_audio(
+        stored_path, orig_filename, file_size, mime_type, enc_dek_b64, iv_b64 = await save_and_encrypt_uploaded_audio(
             file=file,
             org_id=org_id,
             meeting_id=meeting_id
         )
     except Exception as err:
-        raise HTTPException(status_code=500, detail=f"Failed to store audio stream: {str(err)}")
+        raise HTTPException(status_code=500, detail=f"Failed to encrypt and store audio stream: {str(err)}")
 
     # Parse expected speakers list if supplied
     speakers_list = []
@@ -114,7 +121,7 @@ async def upload_meeting_audio(
         except Exception:
             speakers_list = [s.strip() for s in expected_speakers.split(",") if s.strip()]
 
-    # 2. Insert meeting row in database
+    # 2. Insert meeting row in database with encrypted DEK and IV
     meeting_record = {
         "id": meeting_id,
         "org_id": org_id,
@@ -129,6 +136,11 @@ async def upload_meeting_audio(
         "audio_duration_seconds": 0.0,
         "status": "queued",
         "language": language or "en",
+        "metadata": {
+            "encryption": "AES-256-GCM",
+            "encrypted_dek": enc_dek_b64,
+            "audio_iv": iv_b64
+        },
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat()
@@ -140,12 +152,14 @@ async def upload_meeting_audio(
         delete_stored_audio(stored_path)
         raise HTTPException(status_code=500, detail=f"Database record creation failed: {str(db_err)}")
 
-    # 3. Trigger Stage 1 WhisperX STT Pipeline in background
+    # 3. Trigger Stage 1 WhisperX STT Pipeline in background with RAM decryption
     background_tasks.add_task(
         whisper_pipeline.run_stage_1,
         meeting_id=meeting_id,
         org_id=org_id,
         audio_file_path=stored_path,
+        encrypted_dek=enc_dek_b64,
+        audio_iv=iv_b64,
         language=language or "en",
         expected_speakers=speakers_list
     )
@@ -157,6 +171,7 @@ async def upload_meeting_audio(
         "file_name": orig_filename,
         "file_size": file_size,
         "mime_type": mime_type,
+        "encryption": "AES-256-GCM",
         "pipeline_stage": "stage1_whisperx_stt"
     }
 
@@ -262,24 +277,49 @@ async def stream_meeting_audio(
 ):
     """
     Securely streams the meeting audio file for in-browser playback.
-    Accepts bearer header or ?token= query parameter for direct audio tag source.
+    Decrypts AES-256-GCM ciphertext on-the-fly directly to RAM stream.
     """
     auth_header = authorization or (f"Bearer {token}" if token else None)
     caller_user, org_id, _ = get_current_user_and_org(auth_header)
     admin_supabase = get_supabase_admin_client()
 
-    m_res = admin_supabase.table("meetings").select("audio_file_path, audio_mime_type, audio_file_name").eq("id", meeting_id).eq("org_id", org_id).execute()
+    m_res = admin_supabase.table("meetings").select("audio_file_path, audio_mime_type, audio_file_name, metadata").eq("id", meeting_id).eq("org_id", org_id).execute()
     if not m_res.data or not m_res.data[0].get("audio_file_path"):
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     stored_path = m_res.data[0]["audio_file_path"]
-    mime_type = m_res.data[0].get("audio_mime_type") or "audio/mpeg"
-    filename = m_res.data[0].get("audio_file_name") or "meeting_audio.mp3"
+    mime_type = m_res.data[0].get("audio_mime_type") or "audio/webm"
+    filename = m_res.data[0].get("audio_file_name") or "meeting_audio.webm"
+    meta = m_res.data[0].get("metadata") or {}
 
     file_path = get_audio_file_path(stored_path)
     if not file_path or not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio file storage inaccessible")
 
+    # If encrypted with AES-256-GCM, decrypt in RAM
+    if meta.get("encryption") == "AES-256-GCM" and meta.get("encrypted_dek") and meta.get("audio_iv"):
+        try:
+            with open(file_path, "rb") as f:
+                enc_bytes = f.read()
+            plain_bytes = decrypt_audio_bytes(
+                encrypted_audio_bytes=enc_bytes,
+                encrypted_dek_b64=meta["encrypted_dek"],
+                iv_b64=meta["audio_iv"],
+                org_id=org_id
+            )
+            return Response(
+                content=plain_bytes,
+                media_type=mime_type,
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}"',
+                    "Content-Length": str(len(plain_bytes)),
+                    "Accept-Ranges": "bytes"
+                }
+            )
+        except Exception as dec_err:
+            raise HTTPException(status_code=500, detail=f"Failed to decrypt audio stream: {str(dec_err)}")
+
+    # Fallback to direct file response for unencrypted legacy audio
     return FileResponse(
         path=str(file_path),
         media_type=mime_type,
@@ -327,12 +367,13 @@ async def reprocess_stage_1(
     caller_user, org_id, token = get_current_user_and_org(authorization)
     admin_supabase = get_supabase_admin_client()
 
-    m_res = admin_supabase.table("meetings").select("audio_file_path, language").eq("id", meeting_id).eq("org_id", org_id).execute()
+    m_res = admin_supabase.table("meetings").select("audio_file_path, language, metadata").eq("id", meeting_id).eq("org_id", org_id).execute()
     if not m_res.data or not m_res.data[0].get("audio_file_path"):
         raise HTTPException(status_code=404, detail="Meeting audio not found")
 
     stored_path = m_res.data[0]["audio_file_path"]
     lang = m_res.data[0].get("language") or "en"
+    meta = m_res.data[0].get("metadata") or {}
 
     # Clear previous chunks and speakers
     try:
@@ -346,6 +387,8 @@ async def reprocess_stage_1(
         meeting_id=meeting_id,
         org_id=org_id,
         audio_file_path=stored_path,
+        encrypted_dek=meta.get("encrypted_dek"),
+        audio_iv=meta.get("audio_iv"),
         language=lang
     )
 

@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/postgres"
     
+    # 256-bit Vault Master Key (KEK) for AES-256-GCM Envelope Encryption
+    ROSENSE_VAULT_KEK: str = "SCObiCs3FPrRHdAaq/kJR7bwNEPB9c8DWpXdFQNuuZQ="
+    
     # CORS Origins (Allow localhost, 127.0.0.1, local IP adapters, and production frontend)
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
