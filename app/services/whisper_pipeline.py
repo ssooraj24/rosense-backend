@@ -158,8 +158,15 @@ class WhisperXPipeline:
             except Exception as e:
                 print(f"[WARN] Completion updates warning: {e}")
 
+            # 6. Auto-chain Stage 2 Dense Vector Indexing (BGE-Large + pgvector)
+            try:
+                from app.services.embedding_service import bge_embedding_service
+                await bge_embedding_service.embed_and_index_meeting(meeting_id=meeting_id, org_id=org_id)
+            except Exception as stage2_err:
+                print(f"[WARN] Auto Stage 2 Vector Indexing error: {stage2_err}")
+
             return {
-                "status": "stage1_completed",
+                "status": "stage2_completed",
                 "meeting_id": meeting_id,
                 "duration_seconds": duration,
                 "total_chunks": len(chunks),

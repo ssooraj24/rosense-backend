@@ -12,3 +12,5 @@ services:
         value: https://bbpwaxgwxrvesxmouocv.supabase.co
       - key: SUPABASE_JWKS_URL
         value: https://bbpwaxgwxrvesxmouocv.supabase.co/auth/v1/.well-known/jwks.json
+      - key: ROSENSE_VAULT_KEK
+        sync: false

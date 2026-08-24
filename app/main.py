@@ -10,7 +10,7 @@ if str(backend_dir) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.v1.endpoints import auth, superadmin, users, iam_policies, meetings
+from app.api.v1.endpoints import auth, superadmin, users, iam_policies, meetings, search
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -33,6 +33,7 @@ app.include_router(superadmin.router, prefix=f"{settings.API_V1_STR}/superadmin"
 app.include_router(users.router, prefix=f"{settings.API_V1_STR}/users", tags=["User Management"])
 app.include_router(iam_policies.router, prefix=f"{settings.API_V1_STR}/policies", tags=["IAM Policy Engine"])
 app.include_router(meetings.router, prefix=f"{settings.API_V1_STR}/meetings", tags=["Meeting Management & STT Pipeline"])
+app.include_router(search.router, prefix=f"{settings.API_V1_STR}/search", tags=["Vector Search & Semantic Retrieval"])
 
 @app.get("/")
 def root_health_check():

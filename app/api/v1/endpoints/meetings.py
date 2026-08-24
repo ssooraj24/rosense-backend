@@ -17,6 +17,7 @@ from app.services.audio_storage import (
 )
 from app.core.crypto_vault import decrypt_audio_bytes
 from app.services.whisper_pipeline import whisper_pipeline
+from app.services.embedding_service import bge_embedding_service
 
 router = APIRouter()
 
@@ -416,3 +417,69 @@ async def delete_meeting(
 
     admin_supabase.table("meetings").delete().eq("id", meeting_id).eq("org_id", org_id).execute()
     return {"status": "deleted", "meeting_id": meeting_id}
+
+
+@router.post("/{meeting_id}/embed", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_stage2_embedding(
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Triggers Stage 2 Dense Vector Indexing (BGE-Large 1024-dim + pgvector) for a meeting.
+    """
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    m_res = admin_supabase.table("meetings").select("id, status").eq("id", meeting_id).eq("org_id", org_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    background_tasks.add_task(
+        bge_embedding_service.embed_and_index_meeting,
+        meeting_id=meeting_id,
+        org_id=org_id
+    )
+
+    return {
+        "status": "stage2_indexing_queued",
+        "meeting_id": meeting_id,
+        "model": bge_embedding_service.model_name,
+        "dimensions": bge_embedding_service.embedding_dim
+    }
+
+
+@router.get("/{meeting_id}/embeddings/status")
+async def get_embeddings_status(
+    meeting_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Retrieves Stage 2 dense vector embedding index status and chunk counts.
+    """
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    m_res = admin_supabase.table("meetings").select("id, status").eq("id", meeting_id).eq("org_id", org_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    # Count total chunks
+    chunks_res = admin_supabase.table("transcript_chunks").select("id", count="exact").eq("meeting_id", meeting_id).execute()
+    total_chunks = chunks_res.count or len(chunks_res.data or [])
+
+    # Count embeddings
+    embs_res = admin_supabase.table("transcript_embeddings").select("id", count="exact").eq("meeting_id", meeting_id).execute()
+    indexed_chunks = embs_res.count or len(embs_res.data or [])
+
+    is_complete = total_chunks > 0 and indexed_chunks >= total_chunks
+
+    return {
+        "meeting_id": meeting_id,
+        "status": "completed" if is_complete else ("in_progress" if indexed_chunks > 0 else "pending"),
+        "total_transcript_chunks": total_chunks,
+        "indexed_embedding_chunks": indexed_chunks,
+        "model": bge_embedding_service.model_name,
+        "dimension": bge_embedding_service.embedding_dim,
+        "is_indexed": is_complete
+    }
