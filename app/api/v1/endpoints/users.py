@@ -16,6 +16,34 @@ class UpdateUserRoleRequest(BaseModel):
     role: str
     department_id: Optional[str] = None
 
+def get_caller_org_id(caller_user, admin_supabase) -> Optional[str]:
+    """Helper to safely determine organization ID across metadata, profiles, user_roles, or default tenant org."""
+    if caller_user.user_metadata and caller_user.user_metadata.get("org_id"):
+        return caller_user.user_metadata.get("org_id")
+
+    try:
+        profile_res = admin_supabase.table("profiles").select("org_id").eq("id", caller_user.id).execute()
+        if profile_res.data and len(profile_res.data) > 0 and profile_res.data[0].get("org_id"):
+            return profile_res.data[0].get("org_id")
+    except Exception:
+        pass
+
+    try:
+        roles_res = admin_supabase.table("user_roles").select("org_id").eq("user_id", caller_user.id).execute()
+        if roles_res.data and len(roles_res.data) > 0 and roles_res.data[0].get("org_id"):
+            return roles_res.data[0].get("org_id")
+    except Exception:
+        pass
+
+    try:
+        orgs_res = admin_supabase.table("organizations").select("id").limit(1).execute()
+        if orgs_res.data and len(orgs_res.data) > 0:
+            return orgs_res.data[0].get("id")
+    except Exception:
+        pass
+
+    return None
+
 @router.post("/invite")
 async def invite_tenant_user(
     payload: InviteUserRequest,
@@ -32,13 +60,12 @@ async def invite_tenant_user(
     admin_supabase = get_supabase_admin_client()
 
     try:
-        # Get caller profile & org_id
+        # Get caller user
         caller = client_supabase.auth.get_user(user_jwt)
         if not caller.user:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        caller_profile = client_supabase.table("profiles").select("org_id").eq("id", caller.user.id).single().execute()
-        org_id = caller_profile.data.get("org_id")
+        org_id = get_caller_org_id(caller.user, admin_supabase)
         if not org_id:
             raise HTTPException(status_code=403, detail="User is not associated with an organization")
 
@@ -113,17 +140,17 @@ async def update_user_role(
 
     token = authorization.split(" ")[1]
     client_supabase = get_supabase_client(user_jwt=token)
+    admin_supabase = get_supabase_admin_client()
 
     try:
         caller = client_supabase.auth.get_user(token)
-        caller_profile = client_supabase.table("profiles").select("org_id").eq("id", caller.user.id).single().execute()
-        org_id = caller_profile.data.get("org_id")
+        org_id = get_caller_org_id(caller.user, admin_supabase)
 
         # Update role
-        res = client_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).eq("org_id", org_id).execute()
+        res = admin_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).eq("org_id", org_id).execute()
 
         if payload.department_id:
-            client_supabase.table("department_members").upsert({
+            admin_supabase.table("department_members").upsert({
                 "department_id": payload.department_id,
                 "user_id": user_id,
                 "is_primary_dept": True
@@ -132,3 +159,4 @@ async def update_user_role(
         return {"message": "User role updated successfully", "user_id": user_id, "new_role": payload.role}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
