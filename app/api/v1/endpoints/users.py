@@ -157,17 +157,43 @@ async def list_organization_users(
     authorization: Optional[str] = Header(None)
 ):
     """
-    Lists users belonging to the caller's organization (RLS Enforced).
+    Lists users with populated role and organization details.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authorization token")
 
     token = authorization.split(" ")[1]
-    client_supabase = get_supabase_client(user_jwt=token)
+    admin_supabase = get_supabase_admin_client()
 
     try:
-        users_data = client_supabase.table("profiles").select("*, user_roles(role)").execute()
-        return {"users": users_data.data}
+        users_data = admin_supabase.table("profiles").select("*, organizations(id, name), user_roles(role)").execute()
+        formatted_users = []
+        for u in users_data.data or []:
+            user_role = "member"
+            if u.get("user_roles"):
+                roles_list = u["user_roles"]
+                if isinstance(roles_list, list) and len(roles_list) > 0:
+                    user_role = roles_list[0].get("role", "member")
+                elif isinstance(roles_list, dict):
+                    user_role = roles_list.get("role", "member")
+
+            org_name = None
+            if u.get("organizations") and isinstance(u["organizations"], dict):
+                org_name = u["organizations"].get("name")
+
+            formatted_users.append({
+                "id": u.get("id"),
+                "full_name": u.get("full_name") or u.get("email", "User").split("@")[0],
+                "email": u.get("email"),
+                "org_id": u.get("org_id"),
+                "org_name": org_name,
+                "role": user_role,
+                "is_active": u.get("is_active", True),
+                "is_mfa_enabled": u.get("is_mfa_enabled", False),
+                "department": u.get("department", "General")
+            })
+
+        return {"users": formatted_users}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -192,7 +218,7 @@ async def update_user_role(
         org_id = get_caller_org_id(caller.user, admin_supabase)
 
         # Update role
-        res = admin_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).eq("org_id", org_id).execute()
+        res = admin_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).execute()
 
         if payload.department_id:
             admin_supabase.table("department_members").upsert({
@@ -224,27 +250,33 @@ async def update_user_full_record(
     """
     admin_supabase = get_supabase_admin_client()
     try:
+        target_org_id = payload.org_id if payload.org_id else None
+
         # Update Profile
-        update_data = {}
-        if payload.full_name:
+        update_data = {
+            "org_id": target_org_id
+        }
+        if payload.full_name is not None:
             update_data["full_name"] = payload.full_name
-        if payload.org_id:
-            update_data["org_id"] = payload.org_id
         if payload.is_active is not None:
             update_data["is_active"] = payload.is_active
 
-        if update_data:
-            admin_supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        admin_supabase.table("profiles").update(update_data).eq("id", user_id).execute()
 
-        # Update Role & Org in user_roles
-        if payload.role and payload.org_id:
-            admin_supabase.table("user_roles").upsert({
-                "user_id": user_id,
-                "org_id": payload.org_id,
-                "role": payload.role
-            }).execute()
-        elif payload.role:
-            admin_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).execute()
+        # Update Role in user_roles
+        if payload.role:
+            existing_role = admin_supabase.table("user_roles").select("id").eq("user_id", user_id).execute()
+            if existing_role.data and len(existing_role.data) > 0:
+                admin_supabase.table("user_roles").update({
+                    "role": payload.role,
+                    "org_id": target_org_id
+                }).eq("user_id", user_id).execute()
+            else:
+                admin_supabase.table("user_roles").insert({
+                    "user_id": user_id,
+                    "role": payload.role,
+                    "org_id": target_org_id
+                }).execute()
 
         return {"message": "User record updated successfully", "user_id": user_id}
     except Exception as e:
