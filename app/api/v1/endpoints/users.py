@@ -69,33 +69,68 @@ async def invite_tenant_user(
         if not org_id:
             raise HTTPException(status_code=403, detail="User is not associated with an organization")
 
-        # 1. Create auth user in Supabase
-        auth_response = admin_supabase.auth.admin.create_user({
-            "email": payload.email,
-            "password": payload.temp_password,
-            "email_confirm": True,
-            "user_metadata": {
+        user_id = None
+
+        # 1. Create auth user in Supabase (with clean metadata to prevent DB trigger typecast failures)
+        try:
+            auth_response = admin_supabase.auth.admin.create_user({
+                "email": payload.email,
+                "password": payload.temp_password,
+                "email_confirm": True,
+                "user_metadata": {
+                    "full_name": payload.full_name
+                }
+            })
+            if auth_response and auth_response.user:
+                user_id = auth_response.user.id
+        except Exception as create_err:
+            err_str = str(create_err)
+            # If user already exists in auth, retrieve their ID
+            if "already registered" in err_str.lower() or "already exists" in err_str.lower():
+                try:
+                    users_list = admin_supabase.auth.admin.list_users()
+                    for u in users_list:
+                        if u.email.lower() == payload.email.lower():
+                            user_id = u.id
+                            break
+                except Exception:
+                    pass
+            
+            if not user_id:
+                raise HTTPException(status_code=400, detail=f"Failed to create user in Auth: {err_str}")
+
+        # 2. Explicitly update profile with org_id and full_name
+        try:
+            admin_supabase.table("profiles").upsert({
+                "id": user_id,
+                "email": payload.email,
                 "full_name": payload.full_name,
                 "org_id": org_id,
-                "role": payload.role
-            }
-        })
-
-        user_id = auth_response.user.id
-
-        # 2. Update profiles & role assignment
-        admin_supabase.table("user_roles").upsert({
-            "user_id": user_id,
-            "org_id": org_id,
-            "role": payload.role
-        }).execute()
-
-        if payload.department_id:
-            admin_supabase.table("department_members").upsert({
-                "department_id": payload.department_id,
-                "user_id": user_id,
-                "is_primary_dept": True
+                "is_active": True
             }).execute()
+        except Exception as profile_err:
+            print(f"Profile upsert warning: {profile_err}")
+
+        # 3. Assign role in user_roles table
+        try:
+            admin_supabase.table("user_roles").upsert({
+                "user_id": user_id,
+                "org_id": org_id,
+                "role": payload.role
+            }).execute()
+        except Exception as role_err:
+            print(f"User role assignment warning: {role_err}")
+
+        # 4. Department assignment if specified
+        if payload.department_id:
+            try:
+                admin_supabase.table("department_members").upsert({
+                    "department_id": payload.department_id,
+                    "user_id": user_id,
+                    "is_primary_dept": True
+                }).execute()
+            except Exception as dept_err:
+                print(f"Department membership warning: {dept_err}")
 
         return {
             "message": f"User {payload.email} invited successfully",
@@ -104,8 +139,11 @@ async def invite_tenant_user(
             "role": payload.role
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("")
 async def list_organization_users(
