@@ -167,30 +167,44 @@ async def list_organization_users(
 
     try:
         users_data = admin_supabase.table("profiles").select("*, organizations(id, name), user_roles(role)").execute()
+        
+        # Query auth user metadata for persistent role and department info
+        auth_metadata_map = {}
+        try:
+            auth_users_res = admin_supabase.auth.admin.list_users()
+            for au in (auth_users_res or []):
+                auth_metadata_map[au.id] = au.user_metadata or {}
+        except Exception:
+            pass
+
         formatted_users = []
         for u in users_data.data or []:
-            user_role = "member"
+            meta = auth_metadata_map.get(u.get("id"), {})
+            
+            user_role = meta.get("role") or "member"
             if u.get("user_roles"):
                 roles_list = u["user_roles"]
                 if isinstance(roles_list, list) and len(roles_list) > 0:
-                    user_role = roles_list[0].get("role", "member")
+                    user_role = roles_list[0].get("role", user_role)
                 elif isinstance(roles_list, dict):
-                    user_role = roles_list.get("role", "member")
+                    user_role = roles_list.get("role", user_role)
 
             org_name = None
             if u.get("organizations") and isinstance(u["organizations"], dict):
                 org_name = u["organizations"].get("name")
 
+            user_dept = meta.get("department") or u.get("department") or "General"
+
             formatted_users.append({
                 "id": u.get("id"),
-                "full_name": u.get("full_name") or u.get("email", "User").split("@")[0],
+                "full_name": u.get("full_name") or meta.get("full_name") or u.get("email", "User").split("@")[0],
                 "email": u.get("email"),
-                "org_id": u.get("org_id"),
+                "org_id": u.get("org_id") or meta.get("org_id"),
                 "org_name": org_name,
                 "role": user_role,
                 "is_active": u.get("is_active", True),
                 "is_mfa_enabled": u.get("is_mfa_enabled", False),
-                "department": u.get("department", "General")
+                "department": user_dept
             })
 
         return {"users": formatted_users}
@@ -237,6 +251,7 @@ class UpdateFullUserRequest(BaseModel):
     role: Optional[str] = None
     org_id: Optional[str] = None
     department_id: Optional[str] = None
+    department: Optional[str] = None
     is_active: Optional[bool] = True
 
 @router.put("/{user_id}")
@@ -251,6 +266,7 @@ async def update_user_full_record(
     admin_supabase = get_supabase_admin_client()
     try:
         target_org_id = payload.org_id if payload.org_id else None
+        target_dept = payload.department or payload.department_id
 
         # Update Profile
         update_data = {
@@ -261,22 +277,42 @@ async def update_user_full_record(
         if payload.is_active is not None:
             update_data["is_active"] = payload.is_active
 
-        admin_supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        # 1. Update Profile
+        try:
+            admin_supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        except Exception as prof_err:
+            print(f"Profile update note: {prof_err}")
 
-        # Update Role in user_roles
+        # 2. Update Auth User Metadata
+        try:
+            admin_supabase.auth.admin.update_user_by_id(user_id, {
+                "user_metadata": {
+                    "full_name": payload.full_name,
+                    "role": payload.role,
+                    "org_id": target_org_id,
+                    "department": target_dept
+                }
+            })
+        except Exception as auth_err:
+            print(f"Auth metadata update note: {auth_err}")
+
+        # 3. Update Role in user_roles
         if payload.role:
-            existing_role = admin_supabase.table("user_roles").select("id").eq("user_id", user_id).execute()
-            if existing_role.data and len(existing_role.data) > 0:
-                admin_supabase.table("user_roles").update({
-                    "role": payload.role,
-                    "org_id": target_org_id
-                }).eq("user_id", user_id).execute()
-            else:
-                admin_supabase.table("user_roles").insert({
-                    "user_id": user_id,
-                    "role": payload.role,
-                    "org_id": target_org_id
-                }).execute()
+            try:
+                existing_role = admin_supabase.table("user_roles").select("id").eq("user_id", user_id).execute()
+                if existing_role.data and len(existing_role.data) > 0:
+                    admin_supabase.table("user_roles").update({
+                        "role": payload.role,
+                        "org_id": target_org_id
+                    }).eq("user_id", user_id).execute()
+                else:
+                    admin_supabase.table("user_roles").insert({
+                        "user_id": user_id,
+                        "role": payload.role,
+                        "org_id": target_org_id
+                    }).execute()
+            except Exception as role_err:
+                print(f"User role update note: {role_err}")
 
         return {"message": "User record updated successfully", "user_id": user_id}
     except Exception as e:
