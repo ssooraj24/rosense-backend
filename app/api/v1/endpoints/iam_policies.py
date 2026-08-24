@@ -181,3 +181,58 @@ async def list_iam_policies(
             ]
         }
 
+
+class UpdateIAMPolicyRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    policy_document: Optional[IAMPolicyDocument] = None
+
+@router.put("/{policy_id}")
+async def update_custom_iam_policy(
+    policy_id: str,
+    payload: UpdateIAMPolicyRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Updates an existing custom IAM Policy's document statement or description.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization token")
+
+    token = authorization.split(" ")[1]
+    client_supabase = get_supabase_client(user_jwt=token)
+
+    try:
+        update_data = {}
+        if payload.name:
+            update_data["name"] = payload.name
+        if payload.description:
+            update_data["description"] = payload.description
+        if payload.policy_document:
+            update_data["policy_document"] = payload.policy_document.model_dump()
+
+        res = client_supabase.table("iam_policies").update(update_data).eq("id", policy_id).execute()
+        return {"message": "IAM Policy updated successfully", "policy_id": policy_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/{policy_id}")
+async def delete_custom_iam_policy(
+    policy_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Deletes a custom IAM Policy.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization token")
+
+    token = authorization.split(" ")[1]
+    client_supabase = get_supabase_client(user_jwt=token)
+
+    try:
+        client_supabase.table("iam_policies").delete().eq("id", policy_id).execute()
+        return {"message": f"IAM Policy {policy_id} deleted successfully", "policy_id": policy_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+

@@ -14,8 +14,10 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'app_role') THEN
         CREATE TYPE app_role AS ENUM (
-            'superadmin',     -- RoSense AI System Admin
+            'superadmin',     -- RoSense AI System Owner / Root
+            'admin',          -- RoSense AI Internal Ops & DB Admin (No Delete Org privilege)
             'org_admin',      -- Customer Tenant Administrator
+            'spoc',           -- Single Point of Contact / Client Lead
             'dept_manager',   -- Department / Practice Group Manager
             'member',         -- Standard User / Employee
             'auditor',        -- Compliance / Read-Only Auditor

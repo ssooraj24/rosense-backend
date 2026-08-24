@@ -236,3 +236,69 @@ async def generate_invite_link(org_id: str, payload: Optional[InviteOrgAdminRequ
         "expires_in": "7 days"
     }
 
+
+class UpdateOrganizationRequest(BaseModel):
+    name: Optional[str] = None
+    tier: Optional[str] = None
+    is_active: Optional[bool] = None
+
+@router.put("/organizations/{org_id}")
+async def update_organization(
+    org_id: str,
+    payload: UpdateOrganizationRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Superadmin / Operations Admin Endpoint: Updates organization details.
+    """
+    admin_supabase = get_supabase_admin_client()
+    try:
+        update_data = {}
+        if payload.name:
+            update_data["name"] = payload.name
+        if payload.tier:
+            update_data["tier"] = payload.tier
+        if payload.is_active is not None:
+            update_data["is_active"] = payload.is_active
+
+        res = admin_supabase.table("organizations").update(update_data).eq("id", org_id).execute()
+        return {"message": "Organization updated successfully", "org_id": org_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/organizations/{org_id}")
+async def delete_organization(
+    org_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Superadmin Root Endpoint: Deletes an organization (Strictly restricted to SUPER_ADMIN role).
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    token = authorization.split(" ")[1]
+    admin_supabase = get_supabase_admin_client()
+
+    try:
+        # Verify caller role is 'superadmin'
+        client_supabase = get_supabase_client(user_jwt=token)
+        caller = client_supabase.auth.get_user(token)
+        if caller and caller.user:
+            role_res = admin_supabase.table("user_roles").select("role").eq("user_id", caller.user.id).execute()
+            caller_role = role_res.data[0].get("role") if role_res.data else None
+            
+            # Restrict ADMIN (Operations Staff) from deleting organizations
+            if caller_role == "admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Action Forbidden: RoSense AI Internal ADMIN role is restricted from deleting organization records. Only SUPER_ADMIN (Root Owner) can perform organization deletion."
+                )
+
+        admin_supabase.table("organizations").delete().eq("id", org_id).execute()
+        return {"message": f"Organization {org_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+

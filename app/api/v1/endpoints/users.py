@@ -205,3 +205,70 @@ async def update_user_role(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
+class UpdateFullUserRequest(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[str] = None
+    org_id: Optional[str] = None
+    department_id: Optional[str] = None
+    is_active: Optional[bool] = True
+
+@router.put("/{user_id}")
+async def update_user_full_record(
+    user_id: str,
+    payload: UpdateFullUserRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Updates full user profile, role assignment, organization scope, and status.
+    """
+    admin_supabase = get_supabase_admin_client()
+    try:
+        # Update Profile
+        update_data = {}
+        if payload.full_name:
+            update_data["full_name"] = payload.full_name
+        if payload.org_id:
+            update_data["org_id"] = payload.org_id
+        if payload.is_active is not None:
+            update_data["is_active"] = payload.is_active
+
+        if update_data:
+            admin_supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+
+        # Update Role & Org in user_roles
+        if payload.role and payload.org_id:
+            admin_supabase.table("user_roles").upsert({
+                "user_id": user_id,
+                "org_id": payload.org_id,
+                "role": payload.role
+            }).execute()
+        elif payload.role:
+            admin_supabase.table("user_roles").update({"role": payload.role}).eq("user_id", user_id).execute()
+
+        return {"message": "User record updated successfully", "user_id": user_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/{user_id}")
+async def delete_user_record(
+    user_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Deletes user profile, role bindings, and auth account.
+    """
+    admin_supabase = get_supabase_admin_client()
+    try:
+        # Delete profile & roles
+        admin_supabase.table("user_roles").delete().eq("user_id", user_id).execute()
+        admin_supabase.table("profiles").delete().eq("id", user_id).execute()
+        try:
+            admin_supabase.auth.admin.delete_user(user_id)
+        except Exception:
+            pass
+
+        return {"message": f"User {user_id} deleted successfully", "user_id": user_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
