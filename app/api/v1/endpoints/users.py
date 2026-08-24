@@ -9,6 +9,7 @@ class InviteUserRequest(BaseModel):
     email: EmailStr
     full_name: str
     role: str = "member" # 'dept_manager', 'member', 'auditor', 'guest'
+    org_id: Optional[str] = None
     department_id: Optional[str] = None
     temp_password: Optional[str] = "RoSensePass2026!"
 
@@ -17,7 +18,7 @@ class UpdateUserRoleRequest(BaseModel):
     department_id: Optional[str] = None
 
 def get_caller_org_id(caller_user, admin_supabase) -> Optional[str]:
-    """Helper to safely determine organization ID across metadata, profiles, user_roles, or default tenant org."""
+    """Helper to safely determine organization ID across metadata, profiles, user_roles, or default RoSense AI Internal org."""
     if caller_user.user_metadata and caller_user.user_metadata.get("org_id"):
         return caller_user.user_metadata.get("org_id")
 
@@ -36,6 +37,11 @@ def get_caller_org_id(caller_user, admin_supabase) -> Optional[str]:
         pass
 
     try:
+        # Search specifically for RoSense AI Internal system org first
+        internal_org = admin_supabase.table("organizations").select("id").eq("name", "RoSense AI Internal").limit(1).execute()
+        if internal_org.data and len(internal_org.data) > 0:
+            return internal_org.data[0].get("id")
+
         orgs_res = admin_supabase.table("organizations").select("id").limit(1).execute()
         if orgs_res.data and len(orgs_res.data) > 0:
             return orgs_res.data[0].get("id")
@@ -50,7 +56,7 @@ async def invite_tenant_user(
     authorization: Optional[str] = Header(None)
 ):
     """
-    Organization Admin Endpoint: Invites a team member to their organization.
+    Organization Admin Endpoint: Invites a team member to a specified or caller organization.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -65,9 +71,10 @@ async def invite_tenant_user(
         if not caller.user:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        org_id = get_caller_org_id(caller.user, admin_supabase)
+        # Prioritize explicitly provided target org_id in payload, fallback to caller's org_id
+        org_id = payload.org_id or get_caller_org_id(caller.user, admin_supabase)
         if not org_id:
-            raise HTTPException(status_code=403, detail="User is not associated with an organization")
+            raise HTTPException(status_code=400, detail="Organization ID is required to invite user")
 
         user_id = None
 

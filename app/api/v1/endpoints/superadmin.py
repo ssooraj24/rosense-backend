@@ -40,8 +40,16 @@ async def list_organizations():
         # Fallback response for offline or dev environments
         return {
             "status": "success",
-            "count": 2,
+            "count": 3,
             "organizations": [
+                {
+                    "id": "org-rosense-internal-000",
+                    "name": "RoSense AI Internal",
+                    "slug": "rosense-internal",
+                    "tier": "enterprise",
+                    "is_active": True,
+                    "created_at": "2026-08-01T00:00:00Z"
+                },
                 {
                     "id": "org-acme-001",
                     "name": "Acme Legal Partners",
