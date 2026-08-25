@@ -41,10 +41,21 @@ async def lifespan(app: FastAPI):
     load_mamba_gpu()
     yield
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="RoSense AI - Asus RTX 5060 Mamba SSM Worker",
     description="Dedicated On-Premise GPU Inference Worker for Mamba State Space Extraction",
     lifespan=lifespan
+)
+
+# Enable CORS for browser Swagger UI and cross-origin local network requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Configuration defaults (Can be overridden via environment variables)
