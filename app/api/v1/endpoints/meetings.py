@@ -18,6 +18,7 @@ from app.services.audio_storage import (
 from app.core.crypto_vault import decrypt_audio_bytes
 from app.services.whisper_pipeline import whisper_pipeline
 from app.services.embedding_service import bge_embedding_service
+from app.services.mamba_ssm_service import mamba_ssm_service
 
 router = APIRouter()
 
@@ -25,6 +26,33 @@ class UpdateSpeakerRequest(BaseModel):
     detected_name: Optional[str] = None
     role: Optional[str] = None
     color_code: Optional[str] = None
+
+class UpdateDecisionRequest(BaseModel):
+    text: Optional[str] = None
+    reason: Optional[str] = None
+    status: Optional[str] = None # 'open', 'approved', 'rejected', 'superseded'
+    owner_speaker_id: Optional[str] = None
+
+class UpdateTaskRequest(BaseModel):
+    text: Optional[str] = None
+    assignee_name: Optional[str] = None
+    assignee_speaker_id: Optional[str] = None
+    due_date: Optional[str] = None
+    due_timeframe: Optional[str] = None
+    priority: Optional[str] = None # 'low', 'medium', 'high', 'critical'
+    status: Optional[str] = None # 'pending', 'in_progress', 'completed', 'cancelled'
+
+class UpdateRiskRequest(BaseModel):
+    text: Optional[str] = None
+    mitigation: Optional[str] = None
+    severity: Optional[str] = None # 'low', 'medium', 'high', 'critical'
+    status: Optional[str] = None # 'identified', 'mitigating', 'mitigated', 'accepted'
+    owner_speaker_id: Optional[str] = None
+
+class Stage3CallbackRequest(BaseModel):
+    meeting_id: str
+    status: str = "completed"
+    error_details: Optional[str] = None
 
 def get_current_user_and_org(authorization: Optional[str]):
     """
@@ -483,3 +511,203 @@ async def get_embeddings_status(
         "dimension": bge_embedding_service.embedding_dim,
         "is_indexed": is_complete
     }
+
+
+# ============================================================================
+# STAGE 3 MAMBA SSM EXTRACTION ENDPOINTS
+# ============================================================================
+
+@router.post("/{meeting_id}/extract", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_stage3_extraction(
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Triggers Stage 3 Mamba SSM Extraction for a meeting.
+    Extracts decisions, action items, risks, speaker dynamics, and executive insights.
+    """
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    m_res = admin_supabase.table("meetings").select("id, status").eq("id", meeting_id).eq("org_id", org_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    background_tasks.add_task(
+        mamba_ssm_service.extract_and_persist_meeting,
+        meeting_id=meeting_id,
+        org_id=org_id
+    )
+
+    return {
+        "status": "stage3_extraction_queued",
+        "meeting_id": meeting_id,
+        "model": mamba_ssm_service.model_name,
+        "mode": mamba_ssm_service.mode
+    }
+
+
+@router.get("/{meeting_id}/structured")
+async def get_structured_meeting_data(
+    meeting_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Retrieves all Stage 3 extracted structured intelligence for a meeting:
+    - Decisions & rationale
+    - Action items & assigned speakers
+    - Risks, objections & mitigation plans
+    - Speaker Dynamics & Mood Map
+    - Executive Insights & Meeting Health Score
+    """
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    m_res = admin_supabase.table("meetings").select("id, title, status, audio_duration_seconds, recorded_at").eq("id", meeting_id).eq("org_id", org_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    meeting = m_res.data[0]
+
+    # Fetch decisions
+    decisions_res = admin_supabase.table("decisions").select("*, speakers(detected_name, role, color_code)").eq("meeting_id", meeting_id).order("created_at").execute()
+    
+    # Fetch tasks
+    tasks_res = admin_supabase.table("tasks").select("*, speakers(detected_name, role, color_code)").eq("meeting_id", meeting_id).order("created_at").execute()
+
+    # Fetch risks
+    risks_res = admin_supabase.table("risks").select("*, speakers(detected_name, role, color_code)").eq("meeting_id", meeting_id).order("created_at").execute()
+
+    # Fetch speaker dynamics
+    dynamics_res = admin_supabase.table("speaker_dynamics").select("*, speakers(detected_name, role, color_code)").eq("meeting_id", meeting_id).order("created_at").execute()
+
+    # Fetch executive insights
+    insights_res = admin_supabase.table("meeting_insights").select("*").eq("meeting_id", meeting_id).execute()
+    insights = insights_res.data[0] if insights_res.data else None
+
+    return {
+        "meeting": meeting,
+        "insights": insights,
+        "decisions": decisions_res.data or [],
+        "tasks": tasks_res.data or [],
+        "risks": risks_res.data or [],
+        "speaker_dynamics": dynamics_res.data or []
+    }
+
+
+@router.get("/{meeting_id}/dynamics")
+async def get_meeting_speaker_dynamics(
+    meeting_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Retrieves the Meeting Mood Map & Speaker Dynamics profile.
+    """
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    dynamics_res = admin_supabase.table("speaker_dynamics").select("*, speakers(*)").eq("meeting_id", meeting_id).eq("org_id", org_id).execute()
+    insights_res = admin_supabase.table("meeting_insights").select("meeting_health_rating, decision_quality_score, alignment_score, risk_index").eq("meeting_id", meeting_id).execute()
+
+    return {
+        "meeting_id": meeting_id,
+        "health": insights_res.data[0] if insights_res.data else {},
+        "speakers": dynamics_res.data or []
+    }
+
+
+@router.patch("/{meeting_id}/decisions/{decision_id}")
+async def update_decision(
+    meeting_id: str,
+    decision_id: str,
+    payload: UpdateDecisionRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Updates a decision item (status, reason, owner, or text)."""
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    updates = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    res = admin_supabase.table("decisions").update(updates).eq("id", decision_id).eq("meeting_id", meeting_id).eq("org_id", org_id).execute()
+    return {"status": "success", "updated": res.data}
+
+
+@router.patch("/{meeting_id}/tasks/{task_id}")
+async def update_task(
+    meeting_id: str,
+    task_id: str,
+    payload: UpdateTaskRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Updates an action item / task (status, assignee, due date, priority)."""
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    updates = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    res = admin_supabase.table("tasks").update(updates).eq("id", task_id).eq("meeting_id", meeting_id).eq("org_id", org_id).execute()
+    return {"status": "success", "updated": res.data}
+
+
+@router.patch("/{meeting_id}/risks/{risk_id}")
+async def update_risk(
+    meeting_id: str,
+    risk_id: str,
+    payload: UpdateRiskRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Updates a risk item (status, mitigation, severity, owner)."""
+    caller_user, org_id, token = get_current_user_and_org(authorization)
+    admin_supabase = get_supabase_admin_client()
+
+    updates = {k: v for k, v in payload.dict(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided for update")
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    res = admin_supabase.table("risks").update(updates).eq("id", risk_id).eq("meeting_id", meeting_id).eq("org_id", org_id).execute()
+    return {"status": "success", "updated": res.data}
+
+
+@router.post("/{meeting_id}/callback/stage3-complete")
+async def mamba_worker_callback(
+    meeting_id: str,
+    payload: Stage3CallbackRequest
+):
+    """
+    Lightweight completion webhook receiver from Asus RTX 5060 Mamba Worker.
+    Updates meeting status and pipeline job log.
+    """
+    admin_supabase = get_supabase_admin_client()
+    completed_at = datetime.now(timezone.utc).isoformat()
+
+    if payload.status == "completed":
+        admin_supabase.table("meetings").update({
+            "status": "ready",
+            "updated_at": completed_at
+        }).eq("id", meeting_id).execute()
+
+        # Update running pipeline job
+        admin_supabase.table("pipeline_jobs").update({
+            "status": "completed",
+            "progress_pct": 100,
+            "logs": f"[{completed_at}] Asus RTX 5060 Mamba Worker signaled completion.\n",
+            "completed_at": completed_at
+        }).eq("meeting_id", meeting_id).eq("stage", "stage3_mamba_extraction").execute()
+    else:
+        admin_supabase.table("pipeline_jobs").update({
+            "status": "failed",
+            "error_details": payload.error_details or "Worker reported failure",
+            "completed_at": completed_at
+        }).eq("meeting_id", meeting_id).eq("stage", "stage3_mamba_extraction").execute()
+
+    return {"status": "acknowledged", "meeting_id": meeting_id}
+

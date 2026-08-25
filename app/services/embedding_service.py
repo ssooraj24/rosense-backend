@@ -272,14 +272,9 @@ class BGEEmbeddingService:
                 except Exception as insert_err:
                     print(f"[WARN] Failed inserting embedding batch {i}: {insert_err}")
 
-            # 6. Update meeting and job status
+            # 6. Update Stage 2 job status
             completed_at = datetime.now(timezone.utc).isoformat()
             try:
-                supabase.table("meetings").update({
-                    "status": "ready",
-                    "updated_at": completed_at
-                }).eq("id", meeting_id).execute()
-
                 supabase.table("pipeline_jobs").update({
                     "status": "completed",
                     "progress_pct": 100,
@@ -288,6 +283,21 @@ class BGEEmbeddingService:
                 }).eq("id", job_id).execute()
             except Exception:
                 pass
+
+            # 7. Auto-chain Stage 3 Mamba SSM Structured Extraction
+            try:
+                from app.services.mamba_ssm_service import mamba_ssm_service
+                await mamba_ssm_service.extract_and_persist_meeting(meeting_id=meeting_id, org_id=org_id)
+            except Exception as stage3_err:
+                print(f"[WARN] Auto Stage 3 Mamba Extraction error: {stage3_err}")
+                # Ensure meeting status is updated to ready even if Stage 3 experienced warning
+                try:
+                    supabase.table("meetings").update({
+                        "status": "ready",
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", meeting_id).execute()
+                except Exception:
+                    pass
 
             return {
                 "status": "completed",

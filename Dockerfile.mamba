@@ -1,0 +1,59 @@
+# ============================================================================
+# RoSense AI - Stage 3 Mamba SSM Dedicated GPU Worker Dockerfile
+# Optimized for NVIDIA RTX 5060 (8GB VRAM) & Enterprise Server Deployments
+# ============================================================================
+
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
+
+# Set non-interactive mode and environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0" \
+    MAMBA_MODEL_NAME="state-spaces/mamba-2.8b-hf" \
+    PORT=8001
+
+WORKDIR /app
+
+# Install system utilities, build tools, and git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and install latest PyTorch with CUDA 12.4
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Install core Python and AI dependencies
+RUN pip install --no-cache-dir \
+    fastapi==0.115.0 \
+    uvicorn[standard]==0.31.0 \
+    pydantic==2.9.2 \
+    pydantic-settings==2.5.2 \
+    httpx==0.27.2 \
+    supabase==2.8.1 \
+    transformers>=4.48.0 \
+    accelerate>=0.34.0 \
+    einops>=0.8.0
+
+# Install high-speed Mamba SSM & Causal Conv1D CUDA kernels (with fallback handling)
+RUN pip install --no-cache-dir causal-conv1d>=1.4.0 || true
+RUN pip install --no-cache-dir mamba-ssm>=2.2.2 || true
+
+# Copy backend source code into container
+COPY app/ /app/app/
+COPY scripts/ /app/scripts/
+
+# Create persistent storage directories for model cache & checkpoints
+RUN mkdir -p /root/.cache/huggingface /app/checkpoints
+
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Start Mamba Worker
+CMD ["python", "scripts/mamba_worker.py", "--host", "0.0.0.0", "--port", "8001"]

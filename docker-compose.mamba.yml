@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  rosense-mamba-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.mamba
+    image: rosense-mamba-worker:latest
+    container_name: rosense-mamba-worker
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL:-https://your-project-ref.supabase.co}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-your-service-role-key}
+      - MAMBA_MODEL_NAME=${MAMBA_MODEL_NAME:-state-spaces/mamba-2.8b-hf}
+      - MAMBA_CHECKPOINT_DIR=/app/checkpoints
+      - PORT=8001
+    volumes:
+      # Mount HuggingFace cache so model weights (~5.6GB) persist across container restarts
+      - mamba_hf_cache:/root/.cache/huggingface
+      # Mount state checkpoints for infinite context enterprise memory
+      - mamba_checkpoints:/app/checkpoints
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  mamba_hf_cache:
+    name: rosense_mamba_hf_cache
+  mamba_checkpoints:
+    name: rosense_mamba_checkpoints

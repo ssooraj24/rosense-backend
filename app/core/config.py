@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     
     # 256-bit Vault Master Key (KEK) for AES-256-GCM Envelope Encryption
     ROSENSE_VAULT_KEK: str = "SCObiCs3FPrRHdAaq/kJR7bwNEPB9c8DWpXdFQNuuZQ="
+
+    # Stage 3 Mamba SSM Extraction Configuration
+    # Modes: 'auto', 'remote_worker' (Asus RTX 5060 laptop), or 'local_embedded'
+    MAMBA_MODE: str = "auto"
+    MAMBA_WORKER_URL: Optional[str] = "http://192.168.1.100:8001"
+    MAMBA_MODEL_NAME: str = "state-spaces/mamba-2.8b-hf"
+    MAMBA_CHECKPOINT_DIR: str = "./checkpoints"
     
     # CORS Origins (Allow localhost, 127.0.0.1, local IP adapters, and production frontend)
     CORS_ORIGINS: List[str] = [
