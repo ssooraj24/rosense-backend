@@ -250,26 +250,50 @@ class MambaSSMService:
         High-fidelity domain extraction engine for enterprise meetings.
         Parses decisions, commitments/tasks, risks, objections, and speaker dynamics.
         """
-        speaker_by_id = {s["id"]: s for s in speakers if "id" in s}
-        speaker_by_label = {s["speaker_label"]: s for s in speakers if "speaker_label" in s}
+        # Normalize speakers list
+        normalized_speakers = []
+        for idx, s in enumerate(speakers or []):
+            if isinstance(s, dict):
+                normalized_speakers.append({
+                    "id": s.get("id") or str(uuid.uuid4()),
+                    "speaker_label": s.get("speaker_label") or f"SPEAKER_{idx:02d}",
+                    "detected_name": s.get("detected_name") or s.get("name") or f"Speaker {idx+1}",
+                    "role": s.get("role") or "Participant"
+                })
+            elif isinstance(s, str):
+                normalized_speakers.append({
+                    "id": str(uuid.uuid4()),
+                    "speaker_label": f"SPEAKER_{idx:02d}",
+                    "detected_name": s,
+                    "role": "Participant"
+                })
 
-        full_transcript_text = " ".join([c.get("text", "") for c in chunks])
-        total_chunks = len(chunks)
+        if not normalized_speakers and chunks:
+            labels = list({c.get("speaker_label", "SPEAKER_00") for c in chunks if isinstance(c, dict)})
+            for idx, lbl in enumerate(labels):
+                normalized_speakers.append({
+                    "id": str(uuid.uuid4()),
+                    "speaker_label": lbl,
+                    "detected_name": f"Speaker {idx+1}",
+                    "role": "Participant"
+                })
+
+        speaker_by_label = {s["speaker_label"]: s for s in normalized_speakers}
 
         # 1. Extract Decisions
-        decisions = self._extract_decisions(chunks, speaker_by_label)
+        decisions = self._extract_decisions(chunks or [], speaker_by_label)
 
         # 2. Extract Tasks / Commitments
-        tasks = self._extract_tasks(chunks, speaker_by_label)
+        tasks = self._extract_tasks(chunks or [], speaker_by_label)
 
         # 3. Extract Risks & Objections
-        risks = self._extract_risks(chunks, speaker_by_label)
+        risks = self._extract_risks(chunks or [], speaker_by_label)
 
         # 4. Analyze Speaker Dynamics (Mood, Confidence, Concern, Stance)
-        dynamics = self._analyze_speaker_dynamics(chunks, speakers)
+        dynamics = self._analyze_speaker_dynamics(chunks or [], normalized_speakers)
 
         # 5. Generate Executive Insights & Meeting Health Scores
-        insights = self._generate_meeting_insights(chunks, speakers, decisions, tasks, risks, dynamics)
+        insights = self._generate_meeting_insights(chunks or [], normalized_speakers, decisions, tasks, risks, dynamics)
 
         return {
             "decisions": decisions,
