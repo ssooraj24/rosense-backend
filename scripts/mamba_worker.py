@@ -37,6 +37,11 @@ from contextlib import asynccontextmanager
 
 import threading
 
+# Configuration defaults (Can be overridden via environment variables)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project-ref.supabase.co")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "your-service-role-key")
+MODEL_NAME = os.getenv("MAMBA_MODEL_NAME", "state-spaces/mamba-2.8b-hf")
+
 # Global state
 gpu_model = None
 gpu_tokenizer = None
