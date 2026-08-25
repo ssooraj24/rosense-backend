@@ -16,6 +16,14 @@ import asyncio
 import uuid
 import json
 from pathlib import Path
+
+# Add backend directory to sys.path so 'app' package is always importable
+backend_dir = Path(__file__).resolve().parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 

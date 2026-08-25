@@ -8,6 +8,7 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
 # Set non-interactive mode and environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0" \
     MAMBA_MODEL_NAME="state-spaces/mamba-2.8b-hf" \
     PORT=8001
