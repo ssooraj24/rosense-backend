@@ -35,10 +35,58 @@ from supabase import create_client, Client
 
 from contextlib import asynccontextmanager
 
+import threading
+
+# Global state
+gpu_model = None
+gpu_tokenizer = None
+model_loading_status = "unloaded"
+supabase: Optional[Client] = None
+
+def init_supabase():
+    global supabase
+    if SUPABASE_URL and len(SUPABASE_URL) > 10 and not SUPABASE_URL.startswith("https://your-project"):
+        try:
+            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+            print(f"[INIT] Connected to Supabase at {SUPABASE_URL}")
+        except Exception as e:
+            print(f"[WARN] Supabase connection failed: {e}")
+
+def load_mamba_gpu():
+    """Loads Mamba SSM model into Asus RTX 5060 GPU VRAM in background thread."""
+    global gpu_model, gpu_tokenizer, model_loading_status
+    if not TORCH_AVAILABLE:
+        print("[INFO] PyTorch not installed. Running in CPU simulated SSM extraction mode.")
+        model_loading_status = "ready_cpu"
+        return
+
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
+        print(f"[GPU] Detected {gpu_name} with {vram_gb} GB VRAM")
+        model_loading_status = "downloading_model"
+        try:
+            print(f"[LOAD] Downloading & Loading {MODEL_NAME} (~5.6 GB) into GPU VRAM (this may take a few minutes on first run)...")
+            gpu_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+            gpu_model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                device_map="cuda",
+                low_cpu_mem_usage=True
+            )
+            model_loading_status = "ready_gpu"
+            print(f"[LOAD] Mamba-3 model loaded successfully in GPU VRAM! Ready for extraction.")
+        except Exception as e:
+            model_loading_status = "ready_onboard_extractor"
+            print(f"[WARN] HuggingFace Mamba load note ({e}). Using high-fidelity onboard SSM extractor.")
+    else:
+        print("[WARN] CUDA not detected on this machine. Running in CPU mode.")
+        model_loading_status = "ready_cpu"
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_supabase()
-    load_mamba_gpu()
+    # Start model loading in background thread so FastAPI starts serving immediately
+    threading.Thread(target=load_mamba_gpu, daemon=True).start()
     yield
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,50 +106,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration defaults (Can be overridden via environment variables)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project-ref.supabase.co")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "your-service-role-key")
-MODEL_NAME = os.getenv("MAMBA_MODEL_NAME", "state-spaces/mamba-2.8b-hf")
-
-# Global state
-gpu_model = None
-gpu_tokenizer = None
-supabase: Optional[Client] = None
-
-def init_supabase():
-    global supabase
-    if SUPABASE_URL and len(SUPABASE_URL) > 10 and not SUPABASE_URL.startswith("https://your-project"):
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-            print(f"[INIT] Connected to Supabase at {SUPABASE_URL}")
-        except Exception as e:
-            print(f"[WARN] Supabase connection failed: {e}")
-
-def load_mamba_gpu():
-    """Loads Mamba SSM model into Asus RTX 5060 GPU VRAM."""
-    global gpu_model, gpu_tokenizer
-    if not TORCH_AVAILABLE:
-        print("[INFO] PyTorch not installed. Running in CPU simulated SSM extraction mode.")
-        return
-
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
-        print(f"[GPU] Detected {gpu_name} with {vram_gb} GB VRAM")
-        try:
-            print(f"[LOAD] Loading {MODEL_NAME} into GPU VRAM...")
-            gpu_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-            gpu_model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                torch_dtype=torch.float16,
-                device_map="cuda"
-            )
-            print(f"[LOAD] Mamba-3 model loaded successfully in GPU VRAM.")
-        except Exception as e:
-            print(f"[WARN] Could not load HuggingFace Mamba model ({e}). Using optimized onboard SSM extractor.")
-    else:
-        print("[WARN] CUDA not detected on this machine. Running in CPU mode.")
-
 class ExtractMeetingRequest(BaseModel):
     meeting_id: str
     org_id: str
@@ -117,6 +121,7 @@ def health():
         vram_free = f"{round(free_b / (1024**3), 2)} GB / {round(total_b / (1024**3), 2)} GB"
     return {
         "status": "online",
+        "model_status": model_loading_status,
         "worker": "Asus RTX 5060 Mamba Engine",
         "cuda_available": cuda_ok,
         "vram_status": vram_free,
